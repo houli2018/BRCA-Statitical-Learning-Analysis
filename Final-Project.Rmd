@@ -1,0 +1,584 @@
+---
+title: "Final Project"
+author: "Houli Huang"
+date: "12/3/2021"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+  word_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\newpage
+
+## 1. Project Description and Summary
+
+  This project utilizes multiple approaches in modeling Kaggle BRCA Multi-Omics (TCGA) data (loaded as `brca`). The data contains 705 observations, 1936 variables (860 copy number variations, 249 mutations, 604 gene expressions and 223 protein levels), and 5 outcomes (vital.status, PR.Status, ER.Status, HER2.Final.Status, and histological.type). This project focus on modeling 4 of the outcomes: PR.Status, ER.Status, HER2.Final.Status, and histological.type. 
+
+  Firstly, we applied Univariate Analysis to each variable categories and performed data cleaning and pre-processing based on the result from analysis (Part 3). Some gene expressions variables are selected out, because of the presence of outlier(s).
+  
+  Secondly, we use 2 different approach on modeling PR.Status (Part 4). The first approach is Penalized Logistic Regression. We use Lasso regression performed by `cv.glmnet`. Two subgroups of variables are selected by this approach. At lambda.min, we have 63 variables. At lambda.1se, we have 4 variables. The second approach is Discriminant Analysis. We tried 4 combinations of settings: both lda and qda with two groups of variables selected by lambda.min and lambda.1se. The best model is Lasso regression with $\lambda$ = `lambda.min`. The 10-fold cross-validated classification error of this model is **0.1391941**.
+  
+  Thirdly, we use 2 different approach on modeling histological.type (Part 5). The first approach is K-Nearest Neighbors. We also use Lasso regression to reduce input dimension for KNN. The second approach is Support Linear Vector Machine. We use the same group of variables from KNN to train SVM. The best model is linear SVM with `cost` = 0.9526316. And the 10-fold cross validated AUC is **0.94**.
+  
+  Finally, we need to model 4 outcomes with 50 predictors variables(part 6). The first approach we use is Lasso Regression. We fit 4 Lasso Regression models for each outcomes and select desired number of variables based on 3-fold AUC vs number of variables plot. We also tried another approach referenced from “Multiple SVM-RFE for gene selection in cancer classification with expression data.”. The mSVM-RFE method can select a small group of important features from very high dimension input (cancer dataset for example). However, when measure by 3-fold AUC, the performance is not as good as Lasso regression. The best model is Lasso regression. And the averaged 3-fold cross validated auc is **0.9257108**  
+  
+  
+## 2. Literature Review.
+
+  The article ***High dimensional data regression using Lasso model and neural networks with random weights*** foucs on develop a framework for high dimensional data regression. The work from Caihao Cui and Dianhui Wang, suggested using Lasso regression is a good way to reduce input dimension and therefore improve performance of machine learning. Although, we are not going to use machine learning in this project, the idea can be use to improve other models that are sensitive to high dimensions.  
+  
+  The article ***Multiple SVM-RFE for gene selection in cancer classification with expression data*** provide an algorithm to assess variable importance in SVM models with linear kernels. [https://github.com/johncolby/SVM-RFE/] provide a r code implementation of this algorithm. In the last part of this project, we use `mSVM-RFE` function to generate a vector of important ranking for all predictors. And select top 20 most important predictors based on this ranking. Although the performance is not as good as Lasso regression (measured in AUC), the runtime is faster.
+  
+  The article ***Comprehensive Molecular Portraits of Invasive Lobular Breast Cancer*** suggest CDH1 Gene defect is the hall mark for Invasive lobular carcinoma (ILC). And "ER status was clinically determined by immunohistochemistry on 120 of 127 ILC cases, with 94% (n = 113) scoring positively." In data, the above result means CDH1 is the key feature determining ER.Status. We can check this later in our predictor selection for ER.Status.
+  
+  The article ***Supervised Risk Predictor of Breast Cancer Based on Intrinsic Subtypes*** developing a risk model that incorporates the gene expression–based “intrinsic” subtypes. In the risk model building part, the subtype risk model was trained with a multivariable Cox model using Ridge regression. This provides support for us to utilize generalized linear regression in our model fitting. 
+
+
+## 3.Summary Statistics and data processing
+
+```{r}
+#loading data
+brca = read.csv("brca_data_w_subtypes.csv")
+```
+### 3.1 data preprocessing
+Firstly, we will discard the vital.status variable as required. And transfer all outcomes into binary values. Code omitted.
+```{r, echo=FALSE}
+brca = subset(brca, select = -vital.status)
+for (i in 1:nrow(brca)) {
+  if (brca$PR.Status[i] != "Positive" & brca$PR.Status[i] != "Negative") {
+    brca$PR.Status[i] = NA
+  }
+  if (brca$ER.Status[i] != "Positive" & brca$ER.Status[i] != "Negative") {
+    brca$ER.Status[i] = NA
+  }
+  if (brca$HER2.Final.Status[i] != "Positive" & brca$HER2.Final.Status[i] != "Negative") {
+    brca$HER2.Final.Status[i] = NA
+  }
+  if (brca$histological.type[i] != "infiltrating lobular carcinoma" & brca$histological.type[i] != "infiltrating ductal carcinoma") {
+    brca$histological.type[i] = NA
+  }
+  
+}
+brca$PR.Status = as.factor(brca$PR.Status)
+brca$ER.Status = as.factor(brca$ER.Status)
+brca$HER2.Final.Status = as.factor(brca$HER2.Final.Status)
+brca$histological.type = as.factor(make.names(brca$histological.type))
+
+#levels(brca$PR.Status)
+#levels(brca$ER.Status)
+#levels(brca$HER2.Final.Status)
+#levels(brca$histological.type)
+```
+
+```{r, echo=FALSE}
+first_2_char = c("cn","mu","rs","pp")
+var_index = data.frame(start = c(0,0,0,0),end = c(0,0,0,0), count = c(0,0,0,0), row.names = first_2_char)
+for (i in 1:(length(names(brca)) - 4)) {
+  name = names(brca)[i]
+  if (var_index[which(substr(name,1,2) == first_2_char), 1] == 0) {
+    var_index[which(substr(name,1,2) == first_2_char), 1] = i
+  }
+  var_index[which(substr(name,1,2) == first_2_char), 2] = i
+  var_index[which(substr(name,1,2) == first_2_char), 3] = var_index[which(substr(name,1,2) == first_2_char), 3] + 1
+}
+#var_index
+```
+### 3.2 Missing Pattern
+```{r, message=FALSE, warning=FALSE}
+library(mice)
+miss_pattern = md.pattern(brca[,1:1936], plot = FALSE)
+```
+There is no missing values in predictor variables.
+
+### 3.3 Univariate Analysis
+
+We decide to separate the variables into four groups based on their categories and observe their patterns. 
+
+```{r, echo=FALSE}
+min_avg_max = data.frame(min = rep(0, length(names(brca)) - 4), mean = rep(0, length(names(brca)) - 4), max = rep(0, length(names(brca)) - 4))
+for (i in 1:(length(names(brca)) - 4)) {
+  min_avg_max[i,1] = range(brca[,i])[1]
+  min_avg_max[i,2] = mean(brca[,i])
+  min_avg_max[i,3] = range(brca[,i])[2]
+}
+
+par(mfrow=c(2,2))
+
+plot(1:860, min_avg_max[605:1464,1],type = "l", col = "darkgreen", main = "cn variables", ylim = c(-3,3))
+lines(1:860, min_avg_max[605:1464,2],type = "l", col = "blue")
+lines(1:860, min_avg_max[605:1464,3],type = "l", col = "darkred")
+
+plot(1:249, min_avg_max[1465:1713,1],type = "l", col = "darkgreen", main = "mu variables", ylim = c(-1,1))
+lines(1:249, min_avg_max[1465:1713,2],type = "l")
+lines(1:249, min_avg_max[1465:1713,3],type = "l", col = "darkred")
+
+plot(1:604, min_avg_max[1:604,1],type = "l", col = "darkgreen", main = "rs variables", ylim = c(0,21))
+lines(1:604, min_avg_max[1:604,2],type = "l")
+lines(1:604, min_avg_max[1:604,3],type = "l", col = "darkred")
+
+plot(1:223, min_avg_max[1714:1936	,1],type = "l", col = "darkgreen", main = "pp variables", ylim = c(-6,8))
+lines(1:223, min_avg_max[1714:1936,2],type = "l")
+lines(1:223, min_avg_max[1714:1936,3],type = "l", col = "darkred")
+```
+
+ In the above plots, the red curves denote the maximum value of the variable. The green curves denote the minim value of the variable. And the black curves are mean values. We can infer the range of a variable by the space between maximum and minimum. 
+ 
+ Observations:
+
+  * An interesting finding is that `cn` variables are strictly in the range between -2 and 2. And we find that `cn` variables are discrete. And its values belongs to c(-2,-1,0,1,2). Thus, we can consider transferring `cn` into categorical variables.
+
+  * Similarly, `mu` variables have values in c(0,1). However, the data is extremely unbalanced. We need to deal with this issue in the later classification problem.
+  
+  * Minimum values of rs variables are strictly higher than 0, whereas there is no upper bond for the maximums. This might lead to left-skew distribution.
+  
+```{r, echo=FALSE}
+library(data.table)
+par(mfrow=c(1,2))
+odered_rs_mmm =  min_avg_max[1:604,]
+setorder(odered_rs_mmm, mean)
+plot(1:604, odered_rs_mmm$min,type = "l", col = "darkgreen", main = "rs variables", ylim = c(0,21))
+lines(1:604, odered_rs_mmm$mean,type = "l")
+lines(1:604, odered_rs_mmm$max,type = "l", col = "darkred")
+
+odered_pp_mmm =  min_avg_max[1714:1936,]
+setorder(odered_pp_mmm, mean)
+plot(1:223, odered_pp_mmm$min,type = "l", col = "darkgreen", main = "pp variables", ylim = c(-6,6))
+lines(1:223, odered_pp_mmm$mean,type = "l")
+lines(1:223, odered_pp_mmm$max,type = "l", col = "darkred")
+```
+  
+  * After sorting rs and pp by their mean values (see figures above), we find that a rs variable tends to be left-skew if its minimum is 0. For pp variables, we can see the mean values are around 0 for pp variables.A mean value of pp variable below zero is associated with negative outlier(s). And a mean value of pp variable above zero is associated with positive outlier(s).
+  
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+#rs transformation
+for (i in 1:604) {
+  odered_rs_mmm$mean[i] = mean(rank(brca[,i] )/nrow(brca))
+  odered_rs_mmm$min[i] = range(rank(brca[,i])/nrow(brca))[1]
+  odered_rs_mmm$max[i] = range(rank(brca[,i])/nrow(brca))[2]
+  
+}
+setorder(odered_rs_mmm, mean)
+plot(1:604, odered_rs_mmm$min,type = "l", col = "darkgreen", main = "rs variables", ylim = c(0,1.25))
+lines(1:604, odered_rs_mmm$mean,type = "l")
+lines(1:604, odered_rs_mmm$max,type = "l", col = "darkred")
+
+new_pp = brca[,1714:1936]
+
+outlier_index = NULL
+for (i in 1:223) {
+  outlier_index[i] = TRUE
+  if (range(new_pp[,i])[1] < -4 | range(new_pp[,i])[2] > 4) {
+    outlier_index[i] = FALSE
+  }
+  
+}
+
+#pp transformation
+new_pp = new_pp[,outlier_index]
+
+odered_pp_mmm = data.frame(min = rep(0, ncol(new_pp)), mean = rep(0, ncol(new_pp)), max = rep(0, ncol(new_pp)))
+
+for (i in 1:ncol(new_pp)) {
+  odered_pp_mmm$mean[i] = mean(new_pp[,i])
+  odered_pp_mmm$min[i] = range(new_pp[,i])[1]
+  odered_pp_mmm$max[i] = range(new_pp[,i])[2]
+  
+}
+
+setorder(odered_pp_mmm, mean)
+plot(1:ncol(new_pp), odered_pp_mmm$min,type = "l", col = "darkgreen", main = "rs variables", ylim = c(4,-4))
+lines(1:ncol(new_pp), odered_pp_mmm$mean,type = "l")
+lines(1:ncol(new_pp), odered_pp_mmm$max,type = "l", col = "darkred")
+```
+Solutions:
+  
+  * categorical transformation on mu variables.
+
+  * Apply Quantile transformation on rs variables. (result left figure above).
+  
+  * Remove pp variables with outlier(s). (result right figure above).
+
+```{r, echo=FALSE}
+#apply categorical transformation on mu variables
+for (i in 1465:1713) {
+  brca[,i] = as.factor(brca[,i])
+}
+#apply quantile transformation on rs 
+for (i in 1:604) {
+  brca[,i] = rank(brca[,i])/nrow(brca)
+}
+
+outlier_index = NULL
+for (i in 1:1713) {
+  outlier_index[i] = TRUE
+}
+for (i in 1714:1936) {
+  outlier_index[i] = TRUE
+  if (range(brca[,i])[1] < -4 | range(brca[,i])[2] > 4) {
+    outlier_index[i] = FALSE
+  }
+  
+}
+for (i in 1937:ncol(brca)) {
+  outlier_index[i] = TRUE
+}
+
+brca = brca[,outlier_index]
+#dim(brca)
+```
+
+  
+## 4.Modeling PR.Status
+
+### 4.1 Preparation before Modeling
+```{r}
+#discard observations with missing PR.Status value
+brca_pr = subset(brca, !is.na(PR.Status))
+anyNA(brca_pr$PR.Status)
+#splitting data into k groups to cross validate
+k = 10
+group_idx = sample(1:k, nrow(brca_pr), replace = TRUE)
+brca_pr$group_idx = group_idx
+```
+### 4.2 Lasso Regression Approach
+
+The first approach we decide to use to model `PR.Status` is Lasso Logistic Regression. We notice that there are still many predictor variables left after reprocessing. And penalized logistic regression can select a small set of variables for modeling. This selection will be beneficial to our later study. 
+```{r, eval=FALSE, echo=FALSE}
+first_2_char = c("cn","mu","rs","pp")
+var_index = data.frame(start = c(0,0,0,0),end = c(0,0,0,0), count = c(0,0,0,0), row.names = first_2_char)
+for (i in 1:(length(names(brca)) - 4)) {
+  name = names(brca)[i]
+  if (var_index[which(substr(name,1,2) == first_2_char), 1] == 0) {
+    var_index[which(substr(name,1,2) == first_2_char), 1] = i
+  }
+  var_index[which(substr(name,1,2) == first_2_char), 2] = i
+  var_index[which(substr(name,1,2) == first_2_char), 3] = var_index[which(substr(name,1,2) == first_2_char), 3] + 1
+}
+var_index
+```
+We will be using the `cv.glmnet` function in `glmnet` package to perform a Lasso Logistic Regression fit with 10-fold cross validation and using mean classification error as the measure. 
+```{r}
+library(glmnet)
+## Loading required package: Matrix
+## Loaded glmnet 4.1-2
+set.seed(3)
+lasso.fit = cv.glmnet(x = data.matrix(brca_pr[, 1:1918]), y = brca_pr$PR.Status, nfolds = 10, alpha = 1, family = "binomial", type.measure = "class")
+
+par(mfrow=c(1,2))
+plot(lasso.fit$glmnet.fit, "lambda")
+plot(lasso.fit)
+```
+The left figure plots the coefficient of each predictor variable in the model against Log(Lambda). We can observe that there are fewer predictor variables selected (with none-zero coefficients) as $\lambda$ increases. The right figure plots the 10 fold cross-validated classification error against $\lambda$. We can see penalized models at `lambda.min` and `lambda.1se` both give good classification errors around 0.15. Interestingly, there are only 4 predictors left when $\lambda$ = `lambda.1se`. This will be very helpful to predict all outcomes with only 50 predictors allowed.
+
+```{r,collapse = TRUE}
+lasso.fit$lambda.min
+lasso.fit$lambda.1se
+```
+Specifically, we have `lambda.min` = 0.02261326 and `lambda.1se` = 0.1324463.
+
+```{r, collapse = TRUE}
+lasso.fit$cvm[lasso.fit$lambda == lasso.fit$lambda.min]
+lasso.fit$cvm[lasso.fit$lambda == lasso.fit$lambda.1se]
+lasso.fit$nzero[lasso.fit$lambda == lasso.fit$lambda.min]
+nzero_coef = subset(as.matrix(coef(lasso.fit, s = "lambda.1se")),as.matrix(coef(lasso.fit, s = "lambda.1se")) != 0)
+nzero_coef
+```
+When $\lambda$ = `lambda.min`, the averaged 10 fold cross-validated classification error is 0.1391941.
+When $\lambda$ = `lambda.1se`, the averaged 10 fold cross-validated classification error is 0.1556777.
+When $\lambda$ = `lambda.min`, there are 63 predictors left.
+When $\lambda$ = `lambda.1se`, the 4 predictors left are rs_CYP2B7P1, rs_AGR3, rs_GFRA1, and rs_PGR.
+
+### 4.3 Discriminant Analysis
+
+The second approach to modeling PR.Status is Discriminant Analysis. One disadvantage Discriminant Analysis has is it can't take too many input variables. For example, Linear Discriminant Analysis (LDA) requires the number of input variables to be at least lesser than the number of observations. In the case of caner data, we have more than a thousand variables and only 705 observations. To slove this problem, we can use the selected variables from previous part. There are 2 groups of variables, one group selected by `lambda.min` and the other by `lambda.1se`. And we can use both groups on lda and qda, so there will be four combinations.
+
+```{r}
+c_err = data.frame(lda.min = NA, lda.1se = NA, qda.min = NA, lda.1se = NA)
+library(MASS)
+k_err = NULL
+selected_var = (as.matrix(coef(lasso.fit, s = "lambda.1se")) != 0)[2:1919]
+for (k in 1:10) {
+  brca_tra = brca_pr[brca_pr$group_idx != k,]
+  brca_tst = brca_pr[brca_pr$group_idx == k,]
+  lda.fit = lda(data.matrix(brca_tra[, selected_var]) , brca_tra$PR.Status)
+  pred = predict(lda.fit, data.matrix(brca_tst[, selected_var]))
+  k_err[k] = mean(pred$class != brca_tst$PR.Status)
+}
+c_err$lda.1se = mean(k_err)
+```
+
+```{r, echo=FALSE}
+library(MASS)
+k_err = NULL
+selected_var = (as.matrix(coef(lasso.fit, s = "lambda.1se")) != 0)[2:1919]
+for (k in 1:10) {
+  brca_tra = brca_pr[brca_pr$group_idx != k,]
+  brca_tst = brca_pr[brca_pr$group_idx == k,]
+  qda.fit = qda(data.matrix(brca_tra[, selected_var]) , brca_tra$PR.Status)
+  pred = predict(qda.fit, data.matrix(brca_tst[, selected_var]))
+  k_err[k] = mean(pred$class != brca_tst$PR.Status)
+}
+c_err$qda.1se = mean(k_err)
+```
+The above procedure is also applied on lda with min predictor group and qda with 1se and min predictor groups. Similar code chunk omitted.
+```{r}
+c_err
+```
+We find that both lda and qda don't work with variables selected by lambda.min, because there are too many input variables. The best model is lda with formula PR.Status ~ rs_CYP2B7P1 + rs_AGR3 + rs_GFRA1 + rs_PGR. The fact that lda works better than qda suggests our data set is linearly separable. This is a good foundation to apply generalized linear regression. 
+
+## 5. modeling histological.type
+```{r, echo=FALSE}
+#discard observations with missing PR.Status value
+#anyNA(brca$histological.type)
+brca_ht = subset(brca, !is.na(histological.type))
+#anyNA(brca_ht$histological.type)
+#splitting data into k groups to cross validate
+k = 10
+group_idx = sample(1:k, nrow(brca_ht), replace = TRUE)
+brca_ht$group_idx = group_idx
+```
+
+### 5.1 First Approach: KNN
+
+The first approach we utilize is K-Nearest Neighbors. KNN is one of the most common unsupervised statistical training method. And we are starting at full model, i.e. use all predictors to fit the KNN model. the criteria for selecting k is 10-fold AUC. 
+```{r slowknn, eval=FALSE}
+library(caret)
+train_control = trainControl(method = "cv", number = 10, 
+                     classProbs=T,
+                     savePredictions = T)
+knn.fit = train(histological.type ~. - ER.Status - PR.Status - HER2.Final.Status - group_idx, data = brca_ht,
+               method = "knn",
+               trControl = train_control,
+               preProcess = c("center", "scale"),
+               tuneLength = 15,
+               na.action = na.omit
+               )
+```
+```{r, message=FALSE, eval=FALSE, echo=FALSE}
+library(MLeval)
+x <- evalm(knn.fit, silent = TRUE, showplots = FALSE)
+x$stdres$`Group 1`[13,]
+#x$auc-roc
+```
+
+However, we realized that training the full model is over time-consuming and performance is not ideal (with 10-fold AUC around 0.8). We need find a way to reduce dimensionality. 
+
+### 5.2 Reducing Dimensions
+Similar to previous parts, we can adapt Lasso Regression to select predictors. 
+```{r reducingdim, message=FALSE, warning=FALSE}
+library(glmnet)
+set.seed(3)
+lasso.fit = cv.glmnet(x = data.matrix(brca[, 1:1918]), y = brca$histological.type, nfolds = 10, alpha = 1, family = "binomial", type.measure = "auc")
+nzero_coef = subset(as.matrix(coef(lasso.fit, s = "lambda.1se")),as.matrix(coef(lasso.fit, s = "lambda.1se")) != 0)
+nzero_coef
+```
+```{r, echo=FALSE}
+library(caret)
+train_control = trainControl(method = "cv", number = 10, 
+                     classProbs=T,
+                     savePredictions = T)
+knn.fit = train(histological.type ~ rs_WNK4 + rs_TMPRSS3 + rs_HPX+rs_ANKRD43+rs_LOC389033 + rs_DEGS2+rs_TNNT3+mu_CDH1+pp_beta.Catenin, data = brca,
+               method = "knn",
+               trControl = train_control,
+               preProcess = c("center", "scale"),
+               tuneLength = 15,
+               na.action = na.omit
+               )
+```
+And we will use the selected variables above to fit KNN model. 
+```{r, warning=FALSE, message=FALSE, collapse=TRUE}
+library(MLeval)
+knn.fit$bestTune
+x <- evalm(knn.fit, silent = TRUE, showplots = FALSE)
+x$stdres$`Group 1`[13,]
+```
+The best tuning is k = 15. And we can find the 10-fold AUC is increased to **0.9**. 
+
+### 5.3 Second Approach: SVM
+
+The second approach we use is linear SVM. 
+```{r}
+cost.grid = expand.grid(cost = seq(0.01, 2, length = 20))
+train_control = trainControl(method = "cv", number = 10, 
+                     classProbs=T,
+                     savePredictions = T)
+svm.fit = train(histological.type ~rs_WNK4 + rs_TMPRSS3 + rs_HPX+rs_ANKRD43+rs_LOC389033 + rs_DEGS2+rs_TNNT3+mu_CDH1+pp_beta.Catenin, data = brca, method = "svmLinear2", 
+                trControl = train_control,  
+                tuneGrid = cost.grid,
+                na.action = na.omit)
+```
+```{r, collapse=TRUE, out.height='40%'}
+svm.fit$bestTune
+x <- evalm(svm.fit, silent = TRUE, showplots = FALSE)
+x$stdres$`Group 1`[13,]
+x$roc
+```
+The best tuning is cost = 0.2194737. The 10-fold cross validated AUC is **0.94**, higher than KNN model. 
+**The final model we use to model histological.type is linear SVM with formula (histological.type ~rs_WNK4 + rs_TMPRSS3 + rs_HPX+rs_ANKRD43+rs_LOC389033 + rs_DEGS2+rs_TNNT3+mu_CDH1+pp_beta.Catenin) and cost = 0.2194737.**
+
+## 6. Predict all outcomes
+```{r}
+set.seed(1)
+foldID = sample(1:3, 705, replace = TRUE)
+auc_score = data.frame(matrix(0,ncol = 5, nrow = 2))
+colnames(auc_score) = c("PR.Status","ER.Status","HER2.Final.Status","histological.type", "ALL")
+row.names(auc_score) = c("auc", "nzero")
+```
+  Firstly, we need to assign foldid to each observations. And we also set up a data.frame `auc_score` to record the 3-fold cross-validated AUC of each outcome variable.
+
+### 6.1 Use Lasso Regression to Select Predictors for Each Outcome
+
+  We can use Logistic Lasso Regression to select a small group of variables (same as we do previously). Conveniently, we can directly supply the foldid (set up above) to the `cv.glmnet` function. Like we did before, use AUC measure for model selection.
+```{r, echo=FALSE}
+lasso.fit = cv.glmnet(x = data.matrix(brca[!is.na(brca$ER.Status), 1:1918]), y = brca[!is.na(brca$ER.Status), ]$ER.Status, foldid = foldID[!is.na(brca$ER.Status)], alpha = 1, family = "binomial", type.measure = "auc")
+nzero_coef = subset(as.matrix(coef(lasso.fit, s = lasso.fit$lambda[16])),as.matrix(coef(lasso.fit, s = lasso.fit$lambda[16])) != 0)
+coef_er = nzero_coef
+auc_score[1, 2] = lasso.fit$cvm[16]
+auc_score[2, 2] = lasso.fit$nzero[16]
+#par(mfrow=c(1,2))
+#plot(lasso.fit$glmnet.fit, "lambda")
+#plot(lasso.fit)
+
+```
+```{r, echo=FALSE}
+lasso.fit = cv.glmnet(x = data.matrix(brca[!is.na(brca$HER2.Final.Status), 1:1918]), y = brca[!is.na(brca$HER2.Final.Status), ]$HER2.Final.Status, foldid = foldID[!is.na(brca$HER2.Final.Status)], alpha = 1, family = "binomial", type.measure = "auc")
+nzero_coef = subset(as.matrix(coef(lasso.fit, s = "lambda.min")),as.matrix(coef(lasso.fit, s = "lambda.min")) != 0)
+coef_her = nzero_coef
+auc_score[1, 3] = lasso.fit$cvm[lasso.fit$lambda == lasso.fit$lambda.min]
+auc_score[2, 3] = lasso.fit$nzero[lasso.fit$lambda == lasso.fit$lambda.min]
+#par(mfrow=c(1,2))
+#plot(lasso.fit$glmnet.fit, "lambda")
+#plot(lasso.fit)
+```
+```{r, echo=FALSE}
+lasso.fit = cv.glmnet(x = data.matrix(brca[!is.na(brca$histological.type), 1:1918]), y = brca[!is.na(brca$histological.type), ]$histological.type, foldid = foldID[!is.na(brca$histological.type)], alpha = 1, family = "binomial", type.measure = "auc")
+nzero_coef = subset(as.matrix(coef(lasso.fit, s = "lambda.1se")),as.matrix(coef(lasso.fit, s = "lambda.1se")) != 0)
+coef_hist = nzero_coef
+auc_score[1, 4] = lasso.fit$cvm[lasso.fit$lambda == lasso.fit$lambda.1se]
+auc_score[2, 4] = lasso.fit$nzero[lasso.fit$lambda == lasso.fit$lambda.1se]
+#par(mfrow=c(1,2))
+#plot(lasso.fit$glmnet.fit, "lambda")
+#plot(lasso.fit)
+```
+```{r, collapse=TRUE}
+lasso.fit = cv.glmnet(x = data.matrix(brca[!is.na(brca$PR.Status), 1:1918]), y = brca[!is.na(brca$PR.Status), ]$PR.Status, foldid = foldID[!is.na(brca$PR.Status)], alpha = 1, family = "binomial", type.measure = "auc")
+nzero_coef = subset(as.matrix(coef(lasso.fit, s = "lambda.min")),as.matrix(coef(lasso.fit, s = "lambda.min")) != 0)
+coef_pr = nzero_coef
+auc_score[1, 1] = lasso.fit$cvm[lasso.fit$lambda == lasso.fit$lambda.min] 
+auc_score$PR.Status #print AUC score
+auc_score[2, 1] = lasso.fit$nzero[lasso.fit$lambda == lasso.fit$lambda.min] #number of none zero coefficients
+par(mfrow=c(1,2))
+plot(lasso.fit$glmnet.fit, "lambda")
+plot(lasso.fit)
+```
+When $\lambda$ = `lambda.min`, there are 18 predictor variables selected for modeling PR.Status. And the AUC is 0.9107341. The overall performance is good. And we are going to use this same approach on predicting the other 3 outcomes.
+
+```{r, echo=FALSE}
+x = data.frame(matrix(NA,nrow = 19, ncol = 4))
+colnames(x) = c("PR.Status","ER.Status", "HER2.Final.Status", "histological.type")
+x$PR.Status[1:length(coef_pr)] = rownames(coef_pr)
+x$ER.Status[1:length(coef_er)] = rownames(coef_er)
+x$HER2.Final.Status[1:length(coef_her)] = rownames(coef_her)
+x$histological.type[1:length(coef_hist)] = rownames(coef_hist)
+
+x 
+```
+After modeling the other 3 outcomes, we will use the AUC vs. log(lambda) plots to pick $\lambda$ value to select a small group of predictors for each outcome. The table above lists the predictor variables selected for each outcome. We use $\lambda$ = `lambda.min` for PR.Status and HER2.Final.Status, `lambda.1se` for histological.type, and a $\lambda$ between `lambda.min` and `lambda.1se` for ER.Status. As result, 18 variables are selected for PR.Status, 3 for ER.Status, 11 for HER2.Final.Status, and 18 for histological.type. The total number of variables we use is **50**.
+```{r, echo=FALSE}
+
+auc_score[1,5] = mean(as.numeric(auc_score[1,1:4]) )
+auc_score[2,5] = sum(as.numeric(auc_score[2,1:4]))
+auc_score
+```
+The table above lists 3-fold AUC for each outcome and number of predictors selected. **The averaged 3-fold AUC across all outcomes is 0.9257108**
+
+### 6.2 mSVM-RFE
+Another model selection method is reference from ***Multiple SVM-RFE for gene selection in cancer classification with expression data*** (Duan, Kai-Bo et al). mSVM-RFE is a feature selection method that can cut variables by half each iteration (instead of one by one). This function is very convenient in our case with 1918 variables. The usage of svmRFE function is in reference to demo.R [https://github.com/johncolby/SVM-RFE].
+```{r, message=FALSE, results='hide'}
+set.seed(12345)
+library(e1071)
+source('msvmRFE.R')
+input = cbind.data.frame(brca$histological.type, brca[,1:1918])
+input[,1466:1714] = as.numeric(input[,1466:1714] == 1)	
+x = svmRFE(input, k=10, halve.above=100)
+```
+x is a vector where each element is the rank of importance of the corresponding feature.
+```{r}
+var_name = colnames(brca)[2:1918]
+var_name = var_name[x < 20]
+var_name
+```
+Above is the top 20 most important features selected.
+```{r, echo=FALSE}
+cost.grid = expand.grid(cost = seq(0.001, 2, length = 20))
+train_control = trainControl(method = "cv", number = 3,
+                     classProbs=T,
+                     savePredictions = T)
+svm.fit = train(as.formula(paste("histological.type ~ ", paste(var_name, collapse= "+"))), data = brca, method = "svmLinear2", 
+                trControl = train_control,  
+                tuneGrid = cost.grid,
+                na.action = na.omit)
+```
+```{r, collapse=TRUE}
+x <- evalm(svm.fit, silent = TRUE, showplots = FALSE)
+x$roc
+```
+After fitting a linear svm model with the above predictors, we have auc = 0.79. The AUC score is no as good as previous approach. We decided to keep the Lasso model in part 6.2. 
+
+## 7. Reference
+
+  1. Duan, Kai-Bo et al. “Multiple SVM-RFE for gene selection in cancer classification with expression data.” IEEE transactions on nanobioscience vol. 4,3 (2005): 228-34. doi:10.1109/tnb.2005.853657
+
+  2. Caihao Cui, Dianhui Wang, "High dimensional data regression using Lasso model and neural networks with random weights." Information Sciences, Volume 372, 2016, Pages 505-517, ISSN 0020-0255, https://doi.org/10.1016/j.ins.2016.08.060.
+(https://www.sciencedirect.com/science/article/pii/S0020025516306314)
+
+  3. Giovanni Ciriello, Michael L. Gatza et al. "Comprehensive Molecular Portraits of Invasive Lobular Breast Cancer." CELL VOLUME 163, ISSUE 2, P506-519, OCTOBER 08, 2015
+  
+  4. Joel S. Parker, Michael Mullins, er al. "Supervised Risk Predictor of Breast Cancer Based on Intrinsic Subtypes"
+  J Clin Oncol. 2009 Mar 10; 27(8): 1160–1167.Published online 2009 Feb 9. doi: 10.1200/JCO.2008.18.1370
